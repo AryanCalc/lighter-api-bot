@@ -48,29 +48,21 @@ const orderApi = new OrderApi({ basePath: BASE_URL });
 /* ================= PRICE FETCH (SAFE) ================= */
 
 async function getMarketPrice() {
-  const book = await orderApi.orderBooks({ symbol: SYMBOL });
+  try {
+    const res = await fetch(
+      `${BASE_URL}/v1/market/ticker?symbol=${SYMBOL}`
+    );
 
-  if (!book) throw new Error("Orderbook missing");
+    const data = await res.json();
 
-  const bids =
-    book.bids ||
-    book.orderbook?.bids ||
-    book.data?.bids;
+    if (!data || !data.price) {
+      throw new Error("Ticker price not available");
+    }
 
-  if (!bids || bids.length === 0) {
-    throw new Error("No bids in orderbook");
+    return Number(data.price);
+  } catch (err) {
+    throw new Error("Price fetch failed: " + err.message);
   }
-
-  const bestBid = bids[0];
-  const price = Array.isArray(bestBid)
-    ? Number(bestBid[0])
-    : Number(bestBid.price);
-
-  if (!price || isNaN(price)) {
-    throw new Error("Invalid bid price");
-  }
-
-  return price;
 }
 
 /* ================= ORDER FUNCTIONS ================= */
@@ -171,3 +163,4 @@ async function tick() {
 
 log("🚀 REAL MICRO LIVE BOT STARTED");
 setInterval(tick, TICK_INTERVAL);
+
