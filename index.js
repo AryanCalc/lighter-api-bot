@@ -1,166 +1,124 @@
+// ================== BASIC SETUP ==================
+import express from "express";
 import dotenv from "dotenv";
+import WebSocket from "ws";
+
 dotenv.config();
 
-import {
-  SignerClient,
-  TransactionApi,
-  OrderApi,
-} from "zklighter-sdk";
+const app = express();
+const PORT = process.env.PORT || 5000;
 
-/* ================= CONFIG ================= */
-
-const BASE_URL = "https://mainnet.zklighter.elliot.ai";
 const SYMBOL = "ETH-USDC";
 
+// ================== BOT CONFIG ==================
 const GRID_COUNT = 5;
-const GRID_AMOUNT = 3;       // $3 per trade
-const GRID_STEP = 0.02;      // 2%
-const SELL_TARGET = 0.02;   // 2%
+const AMOUNT_PER_GRID = 3; // $3 per grid
+const BOT_ENABLED = process.env.BOT_ENABLED === "true";
 
-const MAX_ACTIVE_GRIDS = 2;
-const TICK_INTERVAL = 7000; // 7 sec
-
-/* ================= STATE ================= */
-
-let basePrice = null;
-let activeGrids = 0;
+// ================== STATE ==================
+let latestPrice = null;
 let grids = [];
+let gridsInitialized = false;
 
-/* ================= LOG ================= */
-
+// ================== LOGGER ==================
 function log(msg) {
-  console.log(new Date().toLocaleTimeString(), msg);
+  const time = new Date().toLocaleTimeString();
+  console.log(`${time} ${msg}`);
 }
 
-/* ================= SDK SETUP ================= */
-
-const signer = new SignerClient({
-  url: BASE_URL,
-  apiPrivateKeys: {
-    [process.env.LIGHTER_API_KEY]: process.env.LIGHTER_API_SECRET,
-  },
-  accountIndex: Number(process.env.LIGHTER_ACCOUNT_INDEX || 1),
+// ================== HTTP SERVER ==================
+app.get("/", (req, res) => {
+  res.send("Lighter Bot is running");
 });
 
-const txApi = new TransactionApi({ basePath: BASE_URL });
-const orderApi = new OrderApi({ basePath: BASE_URL });
+app.listen(PORT, () => {
+  log("🚀 HTTP Server running on port " + PORT);
+});
 
-/* ================= PRICE FETCH (SAFE) ================= */
+// ================== WEBSOCKET PRICE FEED ==================
+const WS_URL = "wss://mainnet.zklighter.elliot.ai/ws";
+const ws = new WebSocket(WS_URL);
 
-async function getMarketPrice() {
+ws.on("open", () => {
+  log("📡 WebSocket connected");
+
+  ws.send(
+    JSON.stringify({
+      type: "subscribe",
+      channel: "ticker",
+      symbol: SYMBOL,
+    })
+  );
+});
+
+ws.on("message", (msg) => {
   try {
-    const res = await fetch(
-      `${BASE_URL}/v1/market/ticker?symbol=${SYMBOL}`
-    );
+    const data = JSON.parse(msg.toString());
 
-    const data = await res.json();
-
-    if (!data || !data.price) {
-      throw new Error("Ticker price not available");
+    if (data?.price) {
+      latestPrice = Number(data.price);
+      log(`📈 Price: ${latestPrice.toFixed(2)}`);
     }
-
-    return Number(data.price);
-  } catch (err) {
-    throw new Error("Price fetch failed: " + err.message);
+  } catch (e) {
+    // ignore junk
   }
-}
+});
 
-/* ================= ORDER FUNCTIONS ================= */
+ws.on("error", (err) => {
+  log("❌ WebSocket error: " + err.message);
+});
 
-async function placeBuy(price) {
-  const nonce = await txApi.nextNonce({
-    accountIndex: signer.accountIndex,
-  });
-
-  const signedTx = await signer.signOrder({
-    symbol: SYMBOL,
-    side: "BUY",
-    price,
-    quoteAmount: GRID_AMOUNT,
-    nonce,
-  });
-
-  await txApi.sendTx({ tx: signedTx });
-  log(`🟢 REAL BUY $${GRID_AMOUNT} @ ${price}`);
-}
-
-async function placeSell(price) {
-  const nonce = await txApi.nextNonce({
-    accountIndex: signer.accountIndex,
-  });
-
-  const signedTx = await signer.signOrder({
-    symbol: SYMBOL,
-    side: "SELL",
-    price,
-    quoteAmount: GRID_AMOUNT,
-    nonce,
-  });
-
-  await txApi.sendTx({ tx: signedTx });
-  log(`🔵 REAL SELL @ ${price}`);
-}
-
-/* ================= GRID SETUP ================= */
-
-function setupGrids(base) {
+// ================== GRID CREATION ==================
+function createGrids(basePrice) {
   grids = [];
+  const gap = basePrice * 0.003; // 0.3% gap
+
   for (let i = 1; i <= GRID_COUNT; i++) {
     grids.push({
-      id: i,
-      buy: +(base * (1 - GRID_STEP * i)).toFixed(2),
-      sell: null,
-      state: "WAIT",
+      buyPrice: basePrice - gap * i,
+      sellPrice: basePrice + gap * i,
+      active: true,
     });
   }
 
-  log(`📊 Grids created from base ${base}`);
+  gridsInitialized = true;
+  log(`📊 ${GRID_COUNT} Grids created from base ${basePrice.toFixed(2)}`);
 }
 
-/* ================= MAIN LOOP ================= */
-
-async function tick() {
+// ================== MAIN BOT LOOP ==================
+setInterval(async () => {
   try {
-    if (process.env.BOT_ENABLED !== "true") return;
-
-    const price = await getMarketPrice();
-    log(`📈 Price: ${price}`);
-
-    // Trailing base price (new high)
-    if (!basePrice || price > basePrice * 1.01) {
-      basePrice = price;
-      setupGrids(basePrice);
+    if (!latestPrice) {
+      log("⏳ Waiting for price...");
       return;
     }
 
-    for (const g of grids) {
-      // BUY
-      if (
-        g.state === "WAIT" &&
-        price <= g.buy &&
-        activeGrids < MAX_ACTIVE_GRIDS
-      ) {
-        await placeBuy(g.buy);
-        g.state = "HOLD";
-        g.sell = +(g.buy * (1 + SELL_TARGET)).toFixed(2);
-        activeGrids++;
-      }
+    if (!gridsInitialized) {
+      createGrids(latestPrice);
+      return;
+    }
 
-      // SELL
-      if (g.state === "HOLD" && price >= g.sell) {
-        await placeSell(g.sell);
-        g.state = "WAIT";
-        g.sell = null;
-        activeGrids--;
+    if (!BOT_ENABLED) {
+      log("🟡 BOT_ENABLED=false | Price monitoring only");
+      return;
+    }
+
+    for (const grid of grids) {
+      if (!grid.active) continue;
+
+      if (latestPrice <= grid.buyPrice) {
+        log(
+          `🟢 BUY SIGNAL | Price: ${grid.buyPrice.toFixed(
+            2
+          )} | Amount: $${AMOUNT_PER_GRID}`
+        );
+        grid.active = false;
       }
     }
   } catch (err) {
-    log(`❌ Error in tick: ${err.message}`);
+    log("❌ Error in tick: " + err.message);
   }
-}
+}, 15000);
 
-/* ================= START ================= */
-
+// ================== START LOG ==================
 log("🚀 REAL MICRO LIVE BOT STARTED");
-setInterval(tick, TICK_INTERVAL);
-
