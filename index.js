@@ -41,6 +41,7 @@ const ws = new WebSocket(WS_URL);
 
 ws.on("open", () => {
   log("📡 WebSocket connected");
+  log("✅ WS SUBSCRIBE SENT");
 
   ws.send(
     JSON.stringify({
@@ -122,3 +123,4 @@ setInterval(async () => {
 
 // ================== START LOG ==================
 log("🚀 REAL MICRO LIVE BOT STARTED");
+
