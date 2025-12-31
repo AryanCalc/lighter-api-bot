@@ -7,43 +7,73 @@ import {
   OrderApi,
 } from "zklighter-sdk";
 
-// ================= CONFIG =================
-const GRID_COUNT = 5;
-const GRID_AMOUNT = 3;      // $3
-const GRID_STEP = 0.02;     // 2%
-const SELL_TARGET = 0.02;
+/* ================= CONFIG ================= */
 
-const MAX_ACTIVE_GRIDS = 2;
 const BASE_URL = "https://mainnet.zklighter.elliot.ai";
 const SYMBOL = "ETH-USDC";
 
-// ================= STATE =================
+const GRID_COUNT = 5;
+const GRID_AMOUNT = 3;       // $3 per trade
+const GRID_STEP = 0.02;      // 2%
+const SELL_TARGET = 0.02;   // 2%
+
+const MAX_ACTIVE_GRIDS = 2;
+const TICK_INTERVAL = 7000; // 7 sec
+
+/* ================= STATE ================= */
+
 let basePrice = null;
 let activeGrids = 0;
 let grids = [];
 
-// ================= LOG =================
+/* ================= LOG ================= */
+
 function log(msg) {
   console.log(new Date().toLocaleTimeString(), msg);
 }
 
-// ================= SDK SETUP =================
+/* ================= SDK SETUP ================= */
+
 const signer = new SignerClient({
   url: BASE_URL,
   apiPrivateKeys: {
     [process.env.LIGHTER_API_KEY]: process.env.LIGHTER_API_SECRET,
   },
-  accountIndex: Number(process.env.LIGHTER_ACCOUNT_INDEX || 0),
+  accountIndex: Number(process.env.LIGHTER_ACCOUNT_INDEX || 1),
 });
 
 const txApi = new TransactionApi({ basePath: BASE_URL });
 const orderApi = new OrderApi({ basePath: BASE_URL });
 
-// ================= HELPERS =================
+/* ================= PRICE FETCH (SAFE) ================= */
+
 async function getMarketPrice() {
   const book = await orderApi.orderBooks({ symbol: SYMBOL });
-  return Number(book.bids[0][0]); // best bid
+
+  if (!book) throw new Error("Orderbook missing");
+
+  const bids =
+    book.bids ||
+    book.orderbook?.bids ||
+    book.data?.bids;
+
+  if (!bids || bids.length === 0) {
+    throw new Error("No bids in orderbook");
+  }
+
+  const bestBid = bids[0];
+  const price = Array.isArray(bestBid)
+    ? Number(bestBid[0])
+    : Number(bestBid.price);
+
+  if (!price || isNaN(price)) {
+    throw new Error("Invalid bid price");
+  }
+
+  return price;
 }
+
+/* ================= ORDER FUNCTIONS ================= */
 
 async function placeBuy(price) {
   const nonce = await txApi.nextNonce({
@@ -79,7 +109,8 @@ async function placeSell(price) {
   log(`🔵 REAL SELL @ ${price}`);
 }
 
-// ================= GRID =================
+/* ================= GRID SETUP ================= */
+
 function setupGrids(base) {
   grids = [];
   for (let i = 1; i <= GRID_COUNT; i++) {
@@ -90,39 +121,53 @@ function setupGrids(base) {
       state: "WAIT",
     });
   }
-  log("📊 Grids created from base " + base);
+
+  log(`📊 Grids created from base ${base}`);
 }
 
-// ================= MAIN LOOP =================
+/* ================= MAIN LOOP ================= */
+
 async function tick() {
-  if (process.env.BOT_ENABLED !== "true") return;
+  try {
+    if (process.env.BOT_ENABLED !== "true") return;
 
-  const price = await getMarketPrice();
-  log(`📈 Price: ${price}`);
+    const price = await getMarketPrice();
+    log(`📈 Price: ${price}`);
 
-  if (!basePrice || price > basePrice * 1.01) {
-    basePrice = price;
-    setupGrids(basePrice);
-    return;
-  }
-
-  for (const g of grids) {
-    if (g.state === "WAIT" && price <= g.buy && activeGrids < MAX_ACTIVE_GRIDS) {
-      await placeBuy(g.buy);
-      g.state = "HOLD";
-      g.sell = +(g.buy * (1 + SELL_TARGET)).toFixed(2);
-      activeGrids++;
+    // Trailing base price (new high)
+    if (!basePrice || price > basePrice * 1.01) {
+      basePrice = price;
+      setupGrids(basePrice);
+      return;
     }
 
-    if (g.state === "HOLD" && price >= g.sell) {
-      await placeSell(g.sell);
-      g.state = "WAIT";
-      g.sell = null;
-      activeGrids--;
+    for (const g of grids) {
+      // BUY
+      if (
+        g.state === "WAIT" &&
+        price <= g.buy &&
+        activeGrids < MAX_ACTIVE_GRIDS
+      ) {
+        await placeBuy(g.buy);
+        g.state = "HOLD";
+        g.sell = +(g.buy * (1 + SELL_TARGET)).toFixed(2);
+        activeGrids++;
+      }
+
+      // SELL
+      if (g.state === "HOLD" && price >= g.sell) {
+        await placeSell(g.sell);
+        g.state = "WAIT";
+        g.sell = null;
+        activeGrids--;
+      }
     }
+  } catch (err) {
+    log(`❌ Error in tick: ${err.message}`);
   }
 }
 
-// ================= START =================
+/* ================= START ================= */
+
 log("🚀 REAL MICRO LIVE BOT STARTED");
-setInterval(tick, 7000);
+setInterval(tick, TICK_INTERVAL);
