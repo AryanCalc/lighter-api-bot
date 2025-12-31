@@ -1,89 +1,94 @@
-/***********************
- * DRY RUN GRID BOT
- * NO REAL TRADES
- ***********************/
+import dotenv from "dotenv";
+dotenv.config();
 
-const GRID_COUNT = 6;
-const GRID_STEP = 0.02;        // 2%
-const GRID_AMOUNT = 15;       // $15
-const MARGIN = 2;             // 2x (logic only)
+const GRID_COUNT = 7;
+const GRID_STEP = 0.02;
+const GRID_AMOUNT = 2;
+const SELL_TARGET = 0.02;
 
-let basePrice = 1000;
-let lastPrice = basePrice;
+const MAX_DAILY_LOSS = 3;
+const MAX_ACTIVE_GRIDS = 2;
+
+let dailyLoss = 0;
+let activeGrids = 0;
+let basePrice = null;
 
 let grids = [];
 
-console.log("🧪 DRY RUN STRATEGY BOT STARTED");
+function log(msg) {
+  console.log(new Date().toLocaleTimeString(), msg);
+}
 
-// -------- GRID SETUP ----------
-function setupGrids(price) {
+// ---- MOCK PLACEHOLDERS (replace with Lighter SDK calls) ----
+async function getPrice() {
+  // 👉 yahan Lighter OrderApi / WS price aayega
+  return basePrice
+    ? basePrice * (1 + (Math.random() - 0.5) * 0.02)
+    : 1000;
+}
+
+async function placeBuy(price) {
+  log(`🟢 REAL BUY $${GRID_AMOUNT} @ ${price.toFixed(2)}`);
+  return true; // assume filled
+}
+
+async function placeSell(price) {
+  log(`🔵 REAL SELL @ ${price.toFixed(2)}`);
+  return true; // assume filled
+}
+// ------------------------------------------------------------
+
+function setupGrids(base) {
   grids = [];
   for (let i = 1; i <= GRID_COUNT; i++) {
     grids.push({
       level: i,
-      buyPrice: +(price * (1 - GRID_STEP * i)).toFixed(2),
-      sellPrice: null,
-      state: "WAIT_BUY" // WAIT_BUY | HOLD
+      buy: +(base * (1 - GRID_STEP * i)).toFixed(2),
+      sell: null,
+      state: "WAIT"
     });
   }
-
-  console.log("📊 New Grids Created from Base:", price);
-  console.table(grids.map(g => ({
-    Grid: g.level,
-    Buy: g.buyPrice,
-    State: g.state
-  })));
+  log("📊 Grids created from base " + base.toFixed(2));
 }
 
-// -------- FAKE PRICE FEED ----------
-function getFakePrice() {
-  const move = (Math.random() - 0.5) * 25; // volatility
-  lastPrice = +(lastPrice + move).toFixed(2);
-  return lastPrice;
-}
+async function tick() {
+  if (process.env.BOT_ENABLED !== "true") return;
 
-// -------- INITIAL SETUP ----------
-setupGrids(basePrice);
+  if (dailyLoss >= MAX_DAILY_LOSS) {
+    log("🛑 Daily loss limit hit. Bot stopped.");
+    process.exit(0);
+  }
 
-// -------- MAIN LOOP ----------
-setInterval(() => {
-  const price = getFakePrice();
-  console.log("\n📈 Current Price:", price);
+  const price = await getPrice();
+  log(`📈 Price: ${price.toFixed(2)}`);
 
-  // 🔼 Trailing base (bull move)
-  if (price > basePrice * 1.01) {
+  if (!basePrice || price > basePrice * 1.01) {
     basePrice = price;
-    console.log("🚀 New High → Updating Base Price:", basePrice);
     setupGrids(basePrice);
     return;
   }
 
-  // 🔽 Grid logic
-  grids.forEach(grid => {
-    // BUY CONDITION
-    if (grid.state === "WAIT_BUY" && price <= grid.buyPrice) {
-      grid.state = "HOLD";
-      grid.sellPrice = +(grid.buyPrice * (1 + GRID_STEP)).toFixed(2);
-
-      console.log(
-        `🟢 BUY SIGNAL | Grid ${grid.level}
-         Price: ${grid.buyPrice}
-         Amount: $${GRID_AMOUNT} | Margin: ${MARGIN}x
-         🎯 Target Sell: ${grid.sellPrice}`
-      );
+  for (const g of grids) {
+    if (g.state === "WAIT" && price <= g.buy && activeGrids < MAX_ACTIVE_GRIDS) {
+      const ok = await placeBuy(g.buy);
+      if (ok) {
+        g.state = "HOLD";
+        g.sell = +(g.buy * (1 + SELL_TARGET)).toFixed(2);
+        activeGrids++;
+      }
     }
 
-    // SELL CONDITION
-    if (grid.state === "HOLD" && price >= grid.sellPrice) {
-      console.log(
-        `🔵 SELL SIGNAL | Grid ${grid.level}
-         Sell Price: ${grid.sellPrice}
-         Profit: 2%`
-      );
-
-      // reset grid
-      grid.state = "WAIT_BUY";
-      grid.sellPrice = null;
+    if (g.state === "HOLD" && price >= g.sell) {
+      const ok = await placeSell(g.sell);
+      if (ok) {
+        g.state = "WAIT";
+        g.sell = null;
+        activeGrids--;
+      }
     }
-  });
-}, 5000);
+  }
+}
+
+// ---- START LOOP ----
+log("🚀 MICRO LIVE BOT STARTED");
+setInterval(tick, 6000);
