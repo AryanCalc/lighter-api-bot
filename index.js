@@ -1,126 +1,133 @@
-// ================== BASIC SETUP ==================
+// ===============================
+// Lighter Grid Bot – FINAL VERSION
+// HTTP Ticker Based (NO WebSocket)
+// ===============================
+
 import express from "express";
 import dotenv from "dotenv";
-import WebSocket from "ws";
+import { OrderApi, SignerClient } from "zklighter-sdk";
 
 dotenv.config();
 
-const app = express();
-const PORT = process.env.PORT || 5000;
-
+// ---------------- CONFIG ----------------
 const SYMBOL = "ETH-USDC";
-
-// ================== BOT CONFIG ==================
 const GRID_COUNT = 5;
-const AMOUNT_PER_GRID = 3; // $3 per grid
-const BOT_ENABLED = process.env.BOT_ENABLED === "true";
+const GRID_AMOUNT = 3;        // $3 per grid
+const MARGIN = 2;             // 2x
+const GRID_GAP_PERCENT = 2;   // 2% gap
+const SELL_PROFIT_PERCENT = 2; // 2% target
+const TICK_INTERVAL = 15000;  // 15 sec
+// ----------------------------------------
 
-// ================== STATE ==================
-let latestPrice = null;
-let grids = [];
-let gridsInitialized = false;
-
-// ================== LOGGER ==================
-function log(msg) {
-  const time = new Date().toLocaleTimeString();
-  console.log(`${time} ${msg}`);
+if (!process.env.LIGHTER_API_KEY || !process.env.LIGHTER_API_SECRET) {
+  console.error("❌ Missing API keys");
+  process.exit(1);
 }
 
-// ================== HTTP SERVER ==================
-app.get("/", (req, res) => {
-  res.send("Lighter Bot is running");
+// ---------- SDK SETUP ----------
+const signer = new SignerClient({
+  apiKey: process.env.LIGHTER_API_KEY,
+  apiSecret: process.env.LIGHTER_API_SECRET,
+  accountIndex: 1,
 });
 
-app.listen(PORT, () => {
-  log("🚀 HTTP Server running on port " + PORT);
-});
+const orderApi = new OrderApi(signer);
 
-// ================== WEBSOCKET PRICE FEED ==================
-const WS_URL = "wss://mainnet.zklighter.elliot.ai/ws";
-const ws = new WebSocket(WS_URL);
+// ---------- EXPRESS (Replit alive) ----------
+const app = express();
+app.get("/", (_, res) => res.send("Lighter Bot Running"));
+app.listen(5000, () =>
+  console.log("🚀 HTTP Server running on port 5000")
+);
 
-ws.on("open", () => {
-  log("📡 WebSocket connected");
-  log("✅ WS SUBSCRIBE SENT");
+// ---------- STATE ----------
+let basePrice = null;
+let grids = [];
+let activeBuys = new Set();
 
-  ws.send(
-    JSON.stringify({
-      type: "subscribe",
-      channel: "ticker",
-      symbol: SYMBOL,
-    })
-  );
-});
+// ---------- PRICE FETCH (SAFE) ----------
+async function getMarketPrice() {
+  const ticker = await orderApi.ticker({ symbol: SYMBOL });
+  if (!ticker || !ticker.lastPrice) return null;
 
-ws.on("message", (msg) => {
-  try {
-    const data = JSON.parse(msg.toString());
+  const price = Number(ticker.lastPrice);
+  return isNaN(price) ? null : price;
+}
 
-    if (data?.price) {
-      latestPrice = Number(data.price);
-      log(`📈 Price: ${latestPrice.toFixed(2)}`);
-    }
-  } catch (e) {
-    // ignore junk
-  }
-});
-
-ws.on("error", (err) => {
-  log("❌ WebSocket error: " + err.message);
-});
-
-// ================== GRID CREATION ==================
-function createGrids(basePrice) {
+// ---------- GRID CREATION ----------
+function createGrids(price) {
   grids = [];
-  const gap = basePrice * 0.003; // 0.3% gap
-
   for (let i = 1; i <= GRID_COUNT; i++) {
+    const buyPrice = price * (1 - (GRID_GAP_PERCENT / 100) * i);
+    const sellPrice = buyPrice * (1 + SELL_PROFIT_PERCENT / 100);
+
     grids.push({
-      buyPrice: basePrice - gap * i,
-      sellPrice: basePrice + gap * i,
-      active: true,
+      level: i,
+      buyPrice,
+      sellPrice,
+      filled: false,
     });
   }
 
-  gridsInitialized = true;
-  log(`📊 ${GRID_COUNT} Grids created from base ${basePrice.toFixed(2)}`);
+  console.log(`📊 ${GRID_COUNT} grids created from base ${price.toFixed(2)}`);
 }
 
-// ================== MAIN BOT LOOP ==================
+// ---------- GRID LOGIC ----------
+function handleGridLogic(price) {
+  if (!basePrice) {
+    basePrice = price;
+    createGrids(price);
+    return;
+  }
+
+  for (const grid of grids) {
+    if (!grid.filled && price <= grid.buyPrice) {
+      console.log(
+        `🟢 BUY SIGNAL | Grid ${grid.level} | Price: ${price.toFixed(2)}`
+      );
+      console.log(
+        `💰 Amount: $${GRID_AMOUNT} | Margin: ${MARGIN}x`
+      );
+      console.log(
+        `🎯 Target Sell: ${grid.sellPrice.toFixed(2)}`
+      );
+
+      grid.filled = true;
+      activeBuys.add(grid.level);
+    }
+
+    if (grid.filled && price >= grid.sellPrice) {
+      console.log(
+        `🔴 SELL SIGNAL | Grid ${grid.level} | Price: ${price.toFixed(2)}`
+      );
+
+      grid.filled = false;
+      activeBuys.delete(grid.level);
+    }
+  }
+}
+
+// ---------- MAIN LOOP ----------
+console.log("🚀 REAL MICRO LIVE BOT STARTED");
+
 setInterval(async () => {
   try {
-    if (!latestPrice) {
-      log("⏳ Waiting for price...");
+    if (process.env.BOT_ENABLED !== "true") {
+      console.log("⏸ BOT DISABLED");
       return;
     }
 
-    if (!gridsInitialized) {
-      createGrids(latestPrice);
+    const price = await getMarketPrice();
+
+    if (!price) {
+      console.log("⏳ Waiting for price...");
       return;
     }
 
-    if (!BOT_ENABLED) {
-      log("🟡 BOT_ENABLED=false | Price monitoring only");
-      return;
-    }
+    console.log(`📈 Price: ${price.toFixed(2)}`);
+    handleGridLogic(price);
 
-    for (const grid of grids) {
-      if (!grid.active) continue;
-
-      if (latestPrice <= grid.buyPrice) {
-        log(
-          `🟢 BUY SIGNAL | Price: ${grid.buyPrice.toFixed(
-            2
-          )} | Amount: $${AMOUNT_PER_GRID}`
-        );
-        grid.active = false;
-      }
-    }
   } catch (err) {
-    log("❌ Error in tick: " + err.message);
+    console.log("❌ Tick error:", err.message);
   }
-}, 15000);
-
-// ================== START LOG ==================
-log("🚀 REAL MICRO LIVE BOT STARTED");
-
+}, TICK_INTERVAL);
